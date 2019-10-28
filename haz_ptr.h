@@ -238,5 +238,5 @@ void HazPtrRetire(T *ptr) {
     DEFAULT_HAZPTR_DOMAIN.PushRetired(ptr);
 }
 
-thread_local std::queue<RetiredBlock> HazPtrDomain::retired_queue_;
+#define ENABLE_LOCAL_DOMAIN (HazPtrDomain DEFAULT_HAZPTR_DOMAIN;thread_local std::queue<RetiredBlock> HazPtrDomain::retired_queue_;)
 

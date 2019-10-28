@@ -8,5 +8,3 @@ int main() {
 
     return 0;
 }
-
-HazPtrDomain DEFAULT_HAZPTR_DOMAIN;
