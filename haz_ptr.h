@@ -12,6 +12,7 @@
 #include <functional>
 #include <bitset>
 #include <iostream>
+#include <mutex>
 
 template<typename T>
 struct DefaultDeleter {
@@ -90,15 +91,29 @@ class HazPtrDomain {
     friend class HazPtrHolder;
 
 private:
-    std::vector<std::atomic<uintptr_t>> protected_;
+    std::mutex mut_;
+    std::atomic<uintptr_t> *protected_;
     std::vector<int> thread_idx_;
     size_t slot_per_thread_;
+    size_t thread_cnt_;
 
     static thread_local size_t idx;
     static thread_local HazPtrSlice local_protected_;
     static thread_local std::queue<RetiredBlock> retired_queue_;
 
 public:
+    void Init(size_t thread_cnt = 16, size_t quota = 2) {
+        thread_cnt_ = thread_cnt + 2;
+        protected_ = (std::atomic<uintptr_t> *) std::allocator<uint8_t>().allocate(
+                sizeof(std::atomic<uintptr_t>) * thread_cnt_ * quota);
+        for (size_t i = 0; i < thread_cnt_ * quota; i++) {
+            new(protected_ + i) std::atomic<uintptr_t>;
+            protected_[i].store((uintptr_t) nullptr, std::memory_order_relaxed);
+        }
+        thread_idx_.resize(thread_cnt_, 0);
+        slot_per_thread_ = quota;
+    }
+
     template<typename T>
     void PushRetired(T *ptr) {
         PushRetired(ptr, DefaultDeleter<T>());
@@ -138,12 +153,16 @@ private:
     }
 
     bool IsNotProtected(uintptr_t ptr) {
-        for (const auto &elem : protected_) {
-            if (ptr == elem.load(std::memory_order_acquire)) {
+        for (size_t i = 0; i < ProtectedSize(); i++) {
+            if (ptr == protected_[i].load(std::memory_order_acquire)) {
                 return false;
             }
         }
         return true;
+    }
+
+    size_t ProtectedSize() const {
+        return thread_cnt_ * slot_per_thread_;
     }
 };
 
@@ -155,30 +174,19 @@ private:
     size_t slot_{kImpossibleSlotNum};
 public:
     template<typename T>
-    bool Pin(std::atomic<T *> &res) {
+    T *Pin(std::atomic<T *> &res) {
         for (;;) {
             T *ptr1 = res.load(std::memory_order_acquire);
             if (!Set(ptr1)) {
-                return false;
+                std::cerr << "This thread can only protect " << DEFAULT_HAZPTR_DOMAIN.slot_per_thread_ << " pointers"
+                          << std::endl;
+                exit(1);
             }
             T *ptr2 = res.load(std::memory_order_acquire);
             if (ptr1 == ptr2) {
-                return true;
+                return ptr1;
             }
         }
-    }
-
-    template<typename T>
-    bool Set(T *ptr) {
-        if (!HazPtrDomain::local_protected_.IsInit()) {
-            SetDomainThreadIdx();
-            HazPtrDomain::local_protected_.Init(
-                    DEFAULT_HAZPTR_DOMAIN.protected_.data() +
-                    DEFAULT_HAZPTR_DOMAIN.slot_per_thread_ * HazPtrDomain::idx,
-                    DEFAULT_HAZPTR_DOMAIN.slot_per_thread_
-            );
-        }
-        return HazPtrDomain::local_protected_.TrySet((uintptr_t) ptr, slot_);
     }
 
     void Reset() {
@@ -193,7 +201,21 @@ public:
     }
 
 private:
+    template<typename T>
+    bool Set(T *ptr) {
+        if (!HazPtrDomain::local_protected_.IsInit()) {
+            SetDomainThreadIdx();
+            HazPtrDomain::local_protected_.Init(
+                    DEFAULT_HAZPTR_DOMAIN.protected_ +
+                    DEFAULT_HAZPTR_DOMAIN.slot_per_thread_ * HazPtrDomain::idx,
+                    DEFAULT_HAZPTR_DOMAIN.slot_per_thread_
+            );
+        }
+        return HazPtrDomain::local_protected_.TrySet((uintptr_t) ptr, slot_);
+    }
+
     static void SetDomainThreadIdx() {
+        std::lock_guard<std::mutex> lk(DEFAULT_HAZPTR_DOMAIN.mut_);
         for (size_t i = 0; i < DEFAULT_HAZPTR_DOMAIN.thread_idx_.size(); i++) {
             if (DEFAULT_HAZPTR_DOMAIN.thread_idx_[i] == 0) {
                 DEFAULT_HAZPTR_DOMAIN.thread_idx_[i] = 1;
@@ -202,6 +224,7 @@ private:
             }
         }
         std::cerr << "Thread amount excess limit" << std::endl;
+        exit(1);
     }
 };
 
