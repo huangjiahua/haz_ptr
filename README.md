@@ -36,7 +36,7 @@ MyType *pinned = h.Pin(atomic_ptr); // passed by ref
 DoWhatEverYouWant(pinned);
 ```
 
-- If you want to free some dynamic pointers, hazard pointer defer that until no thread can read access to it. 
+- If you want to free some dynamic pointers, hazard pointer defer the destruction until no thread can access the pointer. 
 
 ```c++
 std::atomic<MyType *> atomic_ptr;
