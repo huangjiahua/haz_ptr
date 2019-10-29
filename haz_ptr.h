@@ -69,10 +69,12 @@ public:
         return false;
     }
 
-    void Unset(size_t slot) {
+    void Unset(size_t slot, bool no_need_to_publish = false) {
         if (slot < kMaxSlot) {
             map_.reset(slot);
-            protected_[slot]->haz_ptr_.store(std::memory_order_release);
+            if (!no_need_to_publish) {
+                protected_[slot]->haz_ptr_.store((uintptr_t) nullptr, std::memory_order_release);
+            }
         }
     }
 
@@ -187,6 +189,7 @@ class HazPtrHolder {
     constexpr static size_t kImpossibleSlotNum = 1000;
 private:
     size_t slot_;
+    void *pinned_;
 public:
     HazPtrHolder() : slot_(kImpossibleSlotNum) {
     }
@@ -202,14 +205,17 @@ public:
             }
             T *ptr2 = res.load(std::memory_order_acquire);
             if (ptr1 == ptr2) {
+                pinned_ = (void *) ptr1;
                 return ptr1;
             }
             Reset();
         }
     }
 
-    void Reset() {
-        HazPtrDomain::local_protected_.Unset(slot_);
+    inline void Reset() {
+        bool no_need_to_publish = (pinned_ == nullptr);
+        HazPtrDomain::local_protected_.Unset(slot_, no_need_to_publish);
+        pinned_ = nullptr;
         slot_ = kImpossibleSlotNum;
     }
 
@@ -248,12 +254,12 @@ private:
 };
 
 template<typename T>
-void HazPtrRetire(T *ptr, const std::function<void(void *)> &deleter) {
+inline void HazPtrRetire(T *ptr, const std::function<void(void *)> &deleter) {
     DEFAULT_HAZPTR_DOMAIN.PushRetired(ptr, deleter);
 }
 
 template<typename T>
-void HazPtrRetire(T *ptr) {
+inline void HazPtrRetire(T *ptr) {
     DEFAULT_HAZPTR_DOMAIN.PushRetired(ptr);
 }
 
