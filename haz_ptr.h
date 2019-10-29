@@ -24,6 +24,10 @@ struct DefaultDeleter {
     }
 };
 
+struct alignas(128) ProtectedSlot {
+    std::atomic<uintptr_t> haz_ptr_{(uintptr_t) nullptr};
+};
+
 class HazPtrSlice {
     static constexpr size_t kMaxSlot = 8;
 public:
@@ -33,16 +37,21 @@ public:
         return len_ != 0;
     }
 
-    void Init(std::atomic<uintptr_t> *start, size_t len) {
+    void Init(ProtectedSlot **start, size_t len) {
         protected_ = start;
         len_ = len;
         for (size_t i = len; i < kMaxSlot; i++) {
-            map_.set(i, true);
+            map_.set(i);
         }
     }
 
     bool HasFreeSlot() const {
         return !map_.all();
+    }
+
+    bool Empty() const {
+        size_t count = map_.count();
+        return (count == kMaxSlot - len_);
     }
 
     bool TrySet(uintptr_t ptr, size_t &slot) {
@@ -51,8 +60,8 @@ public:
         }
         for (size_t i = 0; i < len_; i++) {
             if (!map_.test(i)) {
-                map_.set(i, true);
-                protected_[i].store(std::memory_order_release);
+                map_.set(i);
+                protected_[i]->haz_ptr_.store(std::memory_order_release);
                 slot = i;
                 return true;
             }
@@ -61,12 +70,14 @@ public:
     }
 
     void Unset(size_t slot) {
-        map_.set(slot, false);
-        protected_[slot].store(std::memory_order_release);
+        if (slot < kMaxSlot) {
+            map_.reset(slot);
+            protected_[slot]->haz_ptr_.store(std::memory_order_release);
+        }
     }
 
 private:
-    std::atomic<uintptr_t> *protected_{nullptr};
+    ProtectedSlot **protected_{nullptr};
     std::bitset<kMaxSlot> map_;
     size_t len_{0};
 };
@@ -82,6 +93,7 @@ struct RetiredBlock {
     }
 };
 
+
 class HazPtrHolder;
 
 class HazPtrDomain {
@@ -92,23 +104,21 @@ class HazPtrDomain {
 
 private:
     std::mutex mut_;
-    std::atomic<uintptr_t> *protected_;
+    std::vector<ProtectedSlot *> protected_;
     std::vector<int> thread_idx_;
     size_t slot_per_thread_;
     size_t thread_cnt_;
 
-    static thread_local size_t idx;
+    static thread_local size_t idx_;
     static thread_local HazPtrSlice local_protected_;
     static thread_local std::queue<RetiredBlock> retired_queue_;
 
 public:
     void Init(size_t thread_cnt = 16, size_t quota = 2) {
         thread_cnt_ = thread_cnt + 2;
-        protected_ = (std::atomic<uintptr_t> *) std::allocator<uint8_t>().allocate(
-                sizeof(std::atomic<uintptr_t>) * thread_cnt_ * quota);
+        protected_.resize(thread_cnt_ * quota, nullptr);
         for (size_t i = 0; i < thread_cnt_ * quota; i++) {
-            new(protected_ + i) std::atomic<uintptr_t>;
-            protected_[i].store((uintptr_t) nullptr, std::memory_order_relaxed);
+            protected_[i] = new ProtectedSlot;
         }
         thread_idx_.resize(thread_cnt_, 0);
         slot_per_thread_ = quota;
@@ -142,7 +152,11 @@ private:
             }
         }
 
+
         for (;;) {
+            if (retired_queue_.empty()) {
+                return;
+            }
             RetiredBlock block = retired_queue_.front();
             if (!IsNotProtected((uintptr_t) block.ptr_)) {
                 break;
@@ -154,7 +168,7 @@ private:
 
     bool IsNotProtected(uintptr_t ptr) {
         for (size_t i = 0; i < ProtectedSize(); i++) {
-            if (ptr == protected_[i].load(std::memory_order_acquire)) {
+            if (ptr == protected_[i]->haz_ptr_.load(std::memory_order_acquire)) {
                 return false;
             }
         }
@@ -168,11 +182,15 @@ private:
 
 extern HazPtrDomain DEFAULT_HAZPTR_DOMAIN;
 
+
 class HazPtrHolder {
     constexpr static size_t kImpossibleSlotNum = 1000;
 private:
-    size_t slot_{kImpossibleSlotNum};
+    size_t slot_;
 public:
+    HazPtrHolder() : slot_(kImpossibleSlotNum) {
+    }
+
     template<typename T>
     T *Pin(std::atomic<T *> &res) {
         for (;;) {
@@ -186,6 +204,7 @@ public:
             if (ptr1 == ptr2) {
                 return ptr1;
             }
+            Reset();
         }
     }
 
@@ -206,8 +225,8 @@ private:
         if (!HazPtrDomain::local_protected_.IsInit()) {
             SetDomainThreadIdx();
             HazPtrDomain::local_protected_.Init(
-                    DEFAULT_HAZPTR_DOMAIN.protected_ +
-                    DEFAULT_HAZPTR_DOMAIN.slot_per_thread_ * HazPtrDomain::idx,
+                    DEFAULT_HAZPTR_DOMAIN.protected_.data() +
+                    DEFAULT_HAZPTR_DOMAIN.slot_per_thread_ * HazPtrDomain::idx_,
                     DEFAULT_HAZPTR_DOMAIN.slot_per_thread_
             );
         }
@@ -219,7 +238,7 @@ private:
         for (size_t i = 0; i < DEFAULT_HAZPTR_DOMAIN.thread_idx_.size(); i++) {
             if (DEFAULT_HAZPTR_DOMAIN.thread_idx_[i] == 0) {
                 DEFAULT_HAZPTR_DOMAIN.thread_idx_[i] = 1;
-                HazPtrDomain::idx = i;
+                HazPtrDomain::idx_ = i;
                 return;
             }
         }
@@ -238,5 +257,20 @@ void HazPtrRetire(T *ptr) {
     DEFAULT_HAZPTR_DOMAIN.PushRetired(ptr);
 }
 
-#define ENABLE_LOCAL_DOMAIN (HazPtrDomain DEFAULT_HAZPTR_DOMAIN;thread_local std::queue<RetiredBlock> HazPtrDomain::retired_queue_;)
+inline void HazPtrInit() {
+    DEFAULT_HAZPTR_DOMAIN.Init();
+}
+
+inline void HazPtrInit(size_t thread_cnt) {
+    DEFAULT_HAZPTR_DOMAIN.Init(thread_cnt);
+}
+
+inline void HazPtrInit(size_t thread_cnt, size_t quota_per_thread) {
+    DEFAULT_HAZPTR_DOMAIN.Init(thread_cnt, quota_per_thread);
+}
+
+#define ENABLE_LOCAL_DOMAIN HazPtrDomain DEFAULT_HAZPTR_DOMAIN;\
+                            thread_local size_t HazPtrDomain::idx_;\
+                            thread_local HazPtrSlice HazPtrDomain::local_protected_;\
+                            thread_local std::queue<RetiredBlock> HazPtrDomain::retired_queue_;
 
