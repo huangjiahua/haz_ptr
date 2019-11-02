@@ -229,6 +229,11 @@ public:
         }
     }
 
+    template <typename T>
+    T *Get() const {
+        return (T*)pinned_;
+    }
+
     inline void Reset() {
         bool no_need_to_publish = (pinned_ == nullptr);
         HazPtrDomain::local_protected_.Unset(slot_, no_need_to_publish);
