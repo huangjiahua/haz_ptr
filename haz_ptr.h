@@ -41,7 +41,7 @@ struct DefaultDeleter {
     }
 };
 
-struct alignas(128) ProtectedSlot {
+struct alignas(64) ProtectedSlot {
     std::atomic<uintptr_t> haz_ptr_{(uintptr_t) nullptr};
 };
 
@@ -78,7 +78,7 @@ public:
         for (size_t i = 0; i < len_; i++) {
             if (!map_.test(i)) {
                 map_.set(i);
-                protected_[i]->haz_ptr_.store(std::memory_order_release);
+                protected_[i]->haz_ptr_.store(ptr, std::memory_order_release);
                 slot = i;
                 return true;
             }
@@ -215,6 +215,11 @@ public:
     T *Pin(std::atomic<T *> &res) {
         for (;;) {
             T *ptr1 = res.load(std::memory_order_acquire);
+
+            if (!ptr1) {
+                return nullptr;
+            }
+
             if (!Set(ptr1)) {
                 std::cerr << "This thread can only protect " << DEFAULT_HAZPTR_DOMAIN.slot_per_thread_ << " pointers"
                           << std::endl;
