@@ -30,6 +30,7 @@
 #include <bitset>
 #include <iostream>
 #include <mutex>
+#include <cassert>
 
 template<typename T>
 struct DefaultDeleter {
@@ -105,6 +106,8 @@ struct RetiredBlock {
     void *ptr_;
     std::function<void(void *)> deleter_;
 
+    RetiredBlock() : ptr_(nullptr), deleter_() {}
+
     RetiredBlock(void *p, std::function<void(void *)> d) : ptr_(p), deleter_(std::move(d)) {}
 
     void Free() {
@@ -116,8 +119,8 @@ struct RetiredBlock {
 class HazPtrHolder;
 
 class HazPtrDomain {
-    constexpr static size_t kMaxRetiredLen = 20;
-    constexpr static size_t kMustTryFree = 5;
+    constexpr static size_t kMaxRetiredLen = 16;
+    constexpr static size_t kMustTryFree = 16;
 
     friend class HazPtrHolder;
 
@@ -161,27 +164,35 @@ public:
 
 private:
     void TryFreeSomeBlock() {
-        for (size_t i = 0; i < kMustTryFree; i++) {
-            RetiredBlock block = retired_queue_.front();
-            retired_queue_.pop();
-            if (IsNotProtected((uintptr_t) block.ptr_)) {
-                block.Free();
-            } else {
-                retired_queue_.push(block);
-            }
+        if (retired_queue_.size() < kMaxRetiredLen) {
+            return;
         }
 
+        std::array<uintptr_t, kMustTryFree> ptrs{};
+        for (auto &ptr : ptrs) ptr = (uintptr_t) nullptr;
+        std::array<RetiredBlock, kMustTryFree> blocks{};
 
-        for (;;) {
-            if (retired_queue_.empty()) {
-                return;
-            }
+        for (size_t i = 0; i < kMustTryFree && !retired_queue_.empty(); i++) {
             RetiredBlock block = retired_queue_.front();
-            if (!IsNotProtected((uintptr_t) block.ptr_)) {
-                break;
-            }
             retired_queue_.pop();
-            block.Free();
+            ptrs[i] = (uintptr_t) block.ptr_;
+            blocks[i] = block;
+        }
+
+        std::bitset<kMustTryFree> res = IsNotProtected(ptrs);
+
+        if (res.none()) {
+            for (RetiredBlock &block: blocks) {
+                block.Free();
+            }
+        } else {
+            for (size_t i = 0; i < kMustTryFree; i++) {
+                if (!res.test(i)) {
+                    blocks[i].Free();
+                } else {
+                    retired_queue_.push(blocks[i]);
+                }
+            }
         }
     }
 
@@ -192,6 +203,20 @@ private:
             }
         }
         return true;
+    }
+
+    std::bitset<kMustTryFree> IsNotProtected(std::array<uintptr_t, kMustTryFree> &ptrs) {
+        std::bitset<kMustTryFree> ret;
+        for (size_t i = 0; i < ProtectedSize(); i++) {
+            uint64_t target = protected_[i]->haz_ptr_.load(std::memory_order_acquire);
+            for (size_t j = 0; j < kMustTryFree; j++) {
+                assert(ptrs[j]);
+                if (ptrs[j] == target) {
+                    ret.set(j);
+                }
+            }
+        }
+        return ret;
     }
 
     size_t ProtectedSize() const {
@@ -234,9 +259,9 @@ public:
         }
     }
 
-    template <typename T>
+    template<typename T>
     T *Get() const {
-        return (T*)pinned_;
+        return (T *) pinned_;
     }
 
     inline void Reset() {
