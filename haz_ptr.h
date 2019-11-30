@@ -119,8 +119,8 @@ struct RetiredBlock {
 class HazPtrHolder;
 
 class HazPtrDomain {
-    constexpr static size_t kMaxRetiredLen = 16;
-    constexpr static size_t kMustTryFree = 16;
+    constexpr static size_t kMaxRetiredLen = 32;
+    constexpr static size_t kMustTryFree = 32;
 
     friend class HazPtrHolder;
 
