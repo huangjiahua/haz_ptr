@@ -42,7 +42,7 @@ struct DefaultDeleter {
     }
 };
 
-struct alignas(64) ProtectedSlot {
+struct alignas(128) ProtectedSlot {
     std::atomic<uintptr_t> haz_ptr_{(uintptr_t) nullptr};
 };
 
@@ -87,6 +87,10 @@ public:
         return false;
     }
 
+    void Replace(uintptr_t ptr, size_t slot) {
+        protected_[slot]->haz_ptr_.store(ptr, std::memory_order_release);
+    }
+
     void Unset(size_t slot, bool no_need_to_publish = false) {
         if (slot < kMaxSlot) {
             map_.reset(slot);
@@ -119,8 +123,8 @@ struct RetiredBlock {
 class HazPtrHolder;
 
 class HazPtrDomain {
-    constexpr static size_t kMaxRetiredLen = 32;
-    constexpr static size_t kMustTryFree = 32;
+    constexpr static size_t kMaxRetiredLen = 68;
+    constexpr static size_t kMustTryFree = 64;
 
     friend class HazPtrHolder;
 
@@ -259,6 +263,30 @@ public:
         }
     }
 
+    template <typename T>
+    T *Repin(std::atomic<T *> &res) {
+        if (slot_ == kImpossibleSlotNum) {
+            return Pin(res);
+        }
+
+        for (;;) {
+            T *ptr1 = res.load(std::memory_order_acquire);
+
+            if (!ptr1) {
+                Reset();
+                return nullptr;
+            }
+
+            Replace(ptr1);
+
+            T *ptr2 = res.load(std::memory_order_acquire);
+            if (ptr1 == ptr2) {
+                pinned_ = (void*) ptr1;
+                return ptr1;
+            }
+        }
+    }
+
     template<typename T>
     T *Get() const {
         return (T *) pinned_;
@@ -289,6 +317,11 @@ private:
             );
         }
         return HazPtrDomain::local_protected_.TrySet((uintptr_t) ptr, slot_);
+    }
+
+    template <typename T>
+    void Replace(T *ptr) {
+        return HazPtrDomain::local_protected_.Replace((uintptr_t) ptr, slot_);
     }
 
     static void SetDomainThreadIdx() {
