@@ -125,6 +125,7 @@ class HazPtrHolder;
 class HazPtrDomain {
     constexpr static size_t kMaxRetiredLen = 68;
     constexpr static size_t kMustTryFree = 64;
+    constexpr static uintptr_t kValidPtrField = 0x0000ffffffffffff;
 
     friend class HazPtrHolder;
 
@@ -215,7 +216,7 @@ private:
             uint64_t target = protected_[i]->haz_ptr_.load(std::memory_order_acquire);
             for (size_t j = 0; j < kMustTryFree; j++) {
                 assert(ptrs[j]);
-                if (ptrs[j] == target) {
+                if ((ptrs[j] & kValidPtrField) == (target & kValidPtrField)) {
                     ret.set(j);
                 }
             }
@@ -263,7 +264,34 @@ public:
         }
     }
 
-    template <typename T>
+    template<typename T, typename IS_SAFE, typename FILTER>
+    T *Pin(std::atomic<T *> &res, IS_SAFE is_safe, FILTER filter) {
+        for (;;) {
+            T *ptr1 = res.load(std::memory_order_acquire);
+
+            if (!ptr1) {
+                return nullptr;
+            }
+
+            if (is_safe(ptr1)) {
+                return filter(ptr1);
+            }
+
+            if (!Set(ptr1)) {
+                std::cerr << "This thread can only protect " << DEFAULT_HAZPTR_DOMAIN.slot_per_thread_ << " pointers"
+                          << std::endl;
+                exit(1);
+            }
+            T *ptr2 = res.load(std::memory_order_acquire);
+            if (ptr1 == ptr2) {
+                pinned_ = (void *) ptr1;
+                return filter(ptr1);
+            }
+            Reset();
+        }
+    }
+
+    template<typename T>
     T *Repin(std::atomic<T *> &res) {
         if (slot_ == kImpossibleSlotNum) {
             return Pin(res);
@@ -281,8 +309,37 @@ public:
 
             T *ptr2 = res.load(std::memory_order_acquire);
             if (ptr1 == ptr2) {
-                pinned_ = (void*) ptr1;
+                pinned_ = (void *) ptr1;
                 return ptr1;
+            }
+        }
+    }
+
+    template<typename T, typename IS_SAFE, typename FILTER>
+    T *Repin(std::atomic<T *> &res, IS_SAFE is_safe, FILTER filter) {
+        if (slot_ == kImpossibleSlotNum) {
+            return Pin(res, is_safe, filter);
+        }
+
+        for (;;) {
+            T *ptr1 = res.load(std::memory_order_acquire);
+
+            if (!ptr1) {
+                Reset();
+                return nullptr;
+            }
+
+            if (is_safe(ptr1)) {
+                Reset();
+                return filter(ptr1);
+            }
+
+            Replace(ptr1);
+
+            T *ptr2 = res.load(std::memory_order_acquire);
+            if (ptr1 == ptr2) {
+                pinned_ = (void *) ptr1;
+                return filter(ptr1);
             }
         }
     }
@@ -319,7 +376,7 @@ private:
         return HazPtrDomain::local_protected_.TrySet((uintptr_t) ptr, slot_);
     }
 
-    template <typename T>
+    template<typename T>
     void Replace(T *ptr) {
         return HazPtrDomain::local_protected_.Replace((uintptr_t) ptr, slot_);
     }
