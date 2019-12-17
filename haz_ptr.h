@@ -125,7 +125,7 @@ class HazPtrHolder;
 class HazPtrDomain {
     constexpr static size_t kMaxRetiredLen = 68;
     constexpr static size_t kMustTryFree = 64;
-    constexpr static uintptr_t kValidPtrField = 0x0000ffffffffffff;
+    constexpr static uintptr_t kValidPtrField = 0x0000ffffffffffffull;
 
     friend class HazPtrHolder;
 
@@ -330,6 +330,7 @@ public:
             }
 
             if (is_safe(ptr1)) {
+                exit(33);
                 Reset();
                 return filter(ptr1);
             }
