@@ -25,12 +25,74 @@
 #include <vector>
 #include <cstdint>
 #include <atomic>
-#include <queue>
+#include <array>
 #include <functional>
 #include <bitset>
 #include <iostream>
 #include <mutex>
 #include <cassert>
+#include <exception>
+
+
+template<typename T, size_t N>
+class StaticQueue {
+private:
+    std::array<T, N + 1> arr_;
+    size_t head_;
+    size_t tail_;
+
+    static size_t Add(size_t a, size_t b) {
+        return ((a + b) % (N + 1));
+    }
+
+public:
+    StaticQueue() : head_(1), tail_(0) {};
+
+    ~StaticQueue() = default;
+
+    void push(const T &elem) {
+        if (Add(tail_, 2) == head_) {
+            throw std::out_of_range("Queue is full");
+        }
+        tail_ = Add(tail_, 1);
+        arr_[tail_] = elem;
+    }
+
+    void pop() {
+        if (Add(tail_, 1) == head_) {
+            throw std::out_of_range("Queue is empty");
+        }
+        head_ = Add(head_, 1);
+    }
+
+    T front() const {
+        if (Add(tail_, 1) == head_) {
+            throw std::out_of_range("Queue is empty");
+        }
+        return arr_[head_];
+    }
+
+    T back() const {
+        if (Add(tail_, 1) == head_) {
+            throw std::out_of_range("Queue is empty");
+        }
+        return arr_[tail_];
+    }
+
+    size_t size() const {
+        if (tail_ >= head_ || (Add(tail_, 1) == head_)) {
+            return tail_ + 1 - head_;
+        } else {
+            return tail_ + N + 2 - head_;
+        }
+    }
+
+    bool empty() const {
+        return (Add(tail_, 1) == head_);
+    }
+
+
+};
 
 template<typename T>
 struct DefaultDeleter {
@@ -123,7 +185,8 @@ struct RetiredBlock {
 class HazPtrHolder;
 
 class HazPtrDomain {
-    constexpr static size_t kMaxRetiredLen = 68;
+    constexpr static size_t kMaxRetiredLen = 128;
+    constexpr static size_t kQueueLen = kMaxRetiredLen + 16;
     constexpr static size_t kMustTryFree = 64;
     constexpr static uintptr_t kValidPtrField = 0x0000ffffffffffffull;
 
@@ -138,7 +201,7 @@ private:
 
     static thread_local size_t idx_;
     static thread_local HazPtrSlice local_protected_;
-    static thread_local std::queue<RetiredBlock> retired_queue_;
+    static thread_local StaticQueue<RetiredBlock, kQueueLen> retired_queue_;
 
 public:
     void Init(size_t thread_cnt = 16, size_t quota = 2) {
@@ -330,7 +393,6 @@ public:
             }
 
             if (is_safe(ptr1)) {
-                exit(33);
                 Reset();
                 return filter(ptr1);
             }
@@ -421,5 +483,5 @@ inline void HazPtrInit(size_t thread_cnt, size_t quota_per_thread) {
 #define ENABLE_LOCAL_DOMAIN HazPtrDomain DEFAULT_HAZPTR_DOMAIN;\
                             thread_local size_t HazPtrDomain::idx_;\
                             thread_local HazPtrSlice HazPtrDomain::local_protected_;\
-                            thread_local std::queue<RetiredBlock> HazPtrDomain::retired_queue_;
+                            thread_local StaticQueue<RetiredBlock, HazPtrDomain::kQueueLen> HazPtrDomain::retired_queue_;
 
