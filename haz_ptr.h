@@ -336,7 +336,6 @@ public:
             }
 
             if (is_safe(ptr1)) {
-                exit(33);
                 Reset();
                 return filter(ptr1);
             }
