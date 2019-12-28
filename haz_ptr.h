@@ -123,8 +123,8 @@ struct RetiredBlock {
 class HazPtrHolder;
 
 class HazPtrDomain {
-    constexpr static size_t kMaxRetiredLen = 68;
-    constexpr static size_t kMustTryFree = 64;
+    constexpr static size_t kMaxRetiredLen = 132;
+    constexpr static size_t kMustTryFree = 128;
     constexpr static uintptr_t kValidPtrField = 0x0000ffffffffffffull;
 
     friend class HazPtrHolder;
@@ -184,19 +184,11 @@ private:
             blocks[i] = block;
         }
 
-        std::bitset<kMustTryFree> res = IsNotProtected(ptrs);
+        MoveBackProtectedPtrs(ptrs, blocks, retired_queue_);
 
-        if (res.none()) {
-            for (RetiredBlock &block: blocks) {
-                block.Free();
-            }
-        } else {
-            for (size_t i = 0; i < kMustTryFree; i++) {
-                if (!res.test(i)) {
-                    blocks[i].Free();
-                } else {
-                    retired_queue_.push(blocks[i]);
-                }
+        for (size_t i = 0; i < kMustTryFree; i++) {
+            if (ptrs[i]) {
+                blocks[i].Free();
             }
         }
     }
@@ -222,6 +214,20 @@ private:
             }
         }
         return ret;
+    }
+
+    void MoveBackProtectedPtrs(std::array<uintptr_t, kMustTryFree> &ptrs,
+            std::array<RetiredBlock, kMustTryFree> &blocks,
+            std::queue<RetiredBlock> &queue) {
+        for (size_t i = 0; i < ProtectedSize(); i++) {
+            uintptr_t target = protected_[i]->haz_ptr_.load(std::memory_order_acquire);
+            for (size_t j = 0; j < kMustTryFree; j++) {
+                if (ptrs[j] && (ptrs[j] & kValidPtrField) == (target & kValidPtrField)) {
+                    queue.push(blocks[j]);
+                    ptrs[j] = (uintptr_t)nullptr;
+                }
+            }
+        }
     }
 
     size_t ProtectedSize() const {
